@@ -1,0 +1,10 @@
+# NUNCA versionar la clave de AEMET
+.env
+
+# Datos capturados (van a Drive/almacenamiento, no a Git)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/

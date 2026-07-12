@@ -1,0 +1,60 @@
+{
+  // Configuraciones de ejecución para VS Code (panel "Run and Debug").
+  // Colocar este fichero en: renfe-collector/.vscode/launch.json
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "1) Colector: UNA pasada (--once)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/collector.py",
+      "args": ["--once", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "2) Inspeccionar capturas de HOY",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/inspect_day.py",
+      "args": ["--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "3) Colector: bucle continuo (60s)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/collector.py",
+      "args": ["--interval", "60", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "4) Descargar GTFS estatico (horarios teoricos)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/download_gtfs_static.py",
+      "args": ["--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "5) Compactar un dia a Parquet (pide la fecha)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/compact_day.py",
+      "args": ["--date", "${input:fechaCompactar}", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "fechaCompactar",
+      "type": "promptString",
+      "description": "Fecha a compactar en formato YYYY-MM-DD (para la prueba, pon la de HOY en UTC)",
+      "default": "2026-06-12"
+    }
+  ]
+}

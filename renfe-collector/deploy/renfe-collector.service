@@ -1,0 +1,18 @@
+[Unit]
+Description=Colector GTFS-RT RENFE Cercanias (TFM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# AJUSTAD usuario y rutas a vuestra maquina:
+User=tfm
+WorkingDirectory=/home/tfm/renfe-collector
+ExecStart=/usr/bin/python3 /home/tfm/renfe-collector/scripts/collector.py --data-dir /home/tfm/renfe-collector/data --interval 60
+Restart=always
+RestartSec=15
+# Si la maquina anda justa de memoria, esto evita sustos:
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target

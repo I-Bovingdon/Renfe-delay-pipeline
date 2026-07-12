@@ -1,0 +1,89 @@
+{
+  // Configuraciones de ejecucion para VS Code (panel "Run and Debug").
+  // IMPORTANTE: al colocarlo en la carpeta, renombralo a  launch.json
+  // Ruta final: aemet-collector/.vscode/launch.json
+  // Requisito: haber creado el fichero .env con AEMET_API_KEY=tu_clave
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "0) Verificar inventario de estaciones",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/collector_live.py",
+      "args": ["--inventario", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "1) EN VIVO: una pasada (observacion horaria)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/collector_live.py",
+      "args": ["--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "2) EN VIVO: bucle continuo (cada hora)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/collector_live.py",
+      "args": ["--loop", "--interval", "3600", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "3) HISTORICO: backfill (pide fechas)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/backfill_historico.py",
+      "args": ["--desde", "${input:fechaDesde}", "--hasta", "${input:fechaHasta}", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "4) Compactar OBSERVACION de hoy a Parquet",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/compact_aemet.py",
+      "args": ["--tipo", "observacion", "--date", "${input:fechaHoy}", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "5) Compactar CLIMATOLOGIA historica a Parquet",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/compact_aemet.py",
+      "args": ["--tipo", "climatologia", "--data-dir", "${workspaceFolder}/data"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "fechaDesde",
+      "type": "promptString",
+      "description": "Fecha inicial del historico (AAAA-MM-DD)",
+      "default": "2020-01-01"
+    },
+    {
+      "id": "fechaHasta",
+      "type": "promptString",
+      "description": "Fecha final del historico (AAAA-MM-DD)",
+      "default": "2025-12-31"
+    },
+    {
+      "id": "fechaHoy",
+      "type": "promptString",
+      "description": "Fecha a compactar (AAAA-MM-DD, normalmente hoy en UTC)",
+      "default": "2026-06-13"
+    }
+  ]
+}

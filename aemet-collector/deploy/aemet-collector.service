@@ -1,0 +1,18 @@
+[Unit]
+Description=Colector AEMET en vivo - observacion horaria (TFM Cercanias)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tfm
+WorkingDirectory=/home/tfm/aemet-collector
+# La clave se lee del fichero .env del WorkingDirectory (o de esta variable):
+# Environment=AEMET_API_KEY=...
+ExecStart=/usr/bin/python3 /home/tfm/aemet-collector/scripts/collector_live.py --loop --interval 3600 --data-dir /home/tfm/aemet-collector/data
+Restart=always
+RestartSec=30
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target
