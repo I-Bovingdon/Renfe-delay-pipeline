@@ -36,6 +36,7 @@ import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -55,6 +56,14 @@ REQUEST_TIMEOUT_S = 20
 MAX_RETRIES_PER_POLL = 2         # reintentos dentro de una misma pasada
 RETRY_BACKOFF_S = 5
 USER_AGENT = "TFM-UCM-CercaniasDelays/1.0 (proyecto academico; contacto: PON_AQUI_TU_EMAIL)"
+
+# --- Watchdog de contenido (detecta apagones silenciosos del emisor, como el 12/07) ---
+MADRID_TZ = ZoneInfo("Europe/Madrid")   # hora local; gestiona el cambio de hora solo
+SERVICE_START_HOUR = 6                   # horario de servicio Cercanias: 06:00...
+SERVICE_END_HOUR = 23                    # ...hasta 23:00 (fuera de esa franja, vacio es esperable)
+EMPTY_THRESHOLD = 10                     # nº de ciclos vacios consecutivos antes del 1er WARNING
+EMPTY_ALARM_REPEAT = 60                  # recordatorio cada N ciclos (~1h) mientras persista
+WATCHDOG_FEEDS = set(FEEDS)              # vigilar los 3 feeds
 
 # ----------------------------------------------------------------------------
 # Logging
@@ -92,6 +101,9 @@ class Collector:
         self.last_header_ts: dict[str, str] = {}
         # contadores para el resumen periódico
         self.stats = {name: {"saved": 0, "dup": 0, "errors": 0} for name in FEEDS}
+        # Watchdog de contenido: racha de ciclos vacios y flag de alarma por feed
+        self.empty_streak: dict[str, int] = {name: 0 for name in FEEDS}
+        self.empty_alarm: dict[str, bool] = {name: False for name in FEEDS}
         self._stop = False
 
     # --- señales (parada limpia con systemd / Ctrl+C) ---
@@ -156,6 +168,11 @@ class Collector:
             if payload is None:
                 continue
 
+            # Watchdog de contenido: evaluar SIEMPRE, antes de la dedup, para que
+            # un apagon con timestamp de cabecera congelado tambien cuente como vacio.
+            n_entities = len(payload.get("entity", []) or [])
+            self._check_empty_content(name, n_entities, fetched_at)
+
             ts = self.header_timestamp(payload)
             if ts and ts == self.last_header_ts.get(name):
                 # El servidor aún no ha generado un feed nuevo: no duplicamos
@@ -165,8 +182,52 @@ class Collector:
             self.last_header_ts[name] = ts
             path = self.save(name, payload, fetched_at)
             self.stats[name]["saved"] += 1
-            n_entities = len(payload.get("entity", []) or [])
             self.logger.debug("[%s] guardado %s (%d entidades)", name, path.name, n_entities)
+
+    # --- watchdog de contenido: alerta si un feed viene vacio en horario de servicio ---
+    def _in_service_window(self, when_utc: datetime) -> bool:
+        """True si el instante (en hora local de Madrid) cae en horario de servicio."""
+        local = when_utc.astimezone(MADRID_TZ)
+        return SERVICE_START_HOUR <= local.hour < SERVICE_END_HOUR
+
+    def _check_empty_content(self, name: str, n_entities: int, when_utc: datetime):
+        """Lleva la cuenta de ciclos vacios consecutivos por feed y avisa al log.
+
+        Motivacion: el 12/07 el emisor devolvio HTTP 200 con 'entity' vacio ~29h.
+        Como no era un error de proceso, ningun control basado en errores salto.
+        Aqui vigilamos el CONTENIDO, no el proceso. Fuera del horario de servicio
+        el vacio es esperable (no circulan trenes), asi que no se alarma.
+        """
+        if name not in WATCHDOG_FEEDS:
+            return
+
+        if n_entities > 0:
+            # Contenido normal. Si veniamos de alarma, avisamos de la recuperacion.
+            if self.empty_alarm[name]:
+                self.logger.warning(
+                    "[%s] CONTENIDO RECUPERADO tras %d ciclos vacios: el feed "
+                    "vuelve a traer entidades.", name, self.empty_streak[name])
+                self.empty_alarm[name] = False
+            self.empty_streak[name] = 0
+            return
+
+        # n_entities == 0: feed estructuralmente valido pero sin contenido
+        self.empty_streak[name] += 1
+        streak = self.empty_streak[name]
+
+        if not self._in_service_window(when_utc):
+            return  # vacio nocturno esperable: no alarmamos
+
+        if streak == EMPTY_THRESHOLD and not self.empty_alarm[name]:
+            self.empty_alarm[name] = True
+            self.logger.warning(
+                "[%s] CONTENIDO VACIO: %d ciclos consecutivos sin entidades en "
+                "horario de servicio. Posible caida del emisor (como el 12/07). "
+                "Revisar el feed de origen.", name, streak)
+        elif self.empty_alarm[name] and streak % EMPTY_ALARM_REPEAT == 0:
+            self.logger.warning(
+                "[%s] CONTENIDO VACIO PERSISTENTE: %d ciclos consecutivos sin "
+                "entidades.", name, streak)
 
     # --- resumen periódico para el log (sanidad del sistema) ---
     def log_summary(self):
