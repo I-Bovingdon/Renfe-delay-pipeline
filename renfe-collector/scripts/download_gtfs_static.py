@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
 """
-Descarga del GTFS ESTÁTICO de RENFE Cercanías (horarios teóricos).
+Descarga del GTFS ESTÁTICO de RENFE Cercanías (horario teórico nacional).
 
-¿Por qué es imprescindible?
-  retraso = hora real (trip_updates) - hora programada (GTFS estático)
-  Además, el estático contiene el catálogo de trips, rutas/líneas, paradas
-  y calendarios que permiten interpretar los trip_id del feed en tiempo real.
+¿Para qué lo necesitamos?
+  El feed en tiempo real (trip_updates) ya trae el retraso calculado por RENFE
+  en `arrival_delay_s`: el VALOR del retraso NO se calcula aquí. Lo que el GTFS
+  estático aporta es el contexto que el feed no da:
+    - Resolver la línea / `route_id` (viene 100% nula en el feed) cruzando por
+      núcleo de `trip_id` contra trips.txt.
+    - Filtrar el núcleo de Madrid de forma estructural (route_id que empieza por
+      "10T"), en vez de un bounding box geográfico aproximado.
+    - Horario teórico y topología de la red (stop_times, paradas restantes,
+      tramos compartidos) como features del modelo.
+    - Definir la población de trenes (programados vs observados) para acotar el
+      target.
 
-Los horarios cambian (festivos, obras, nuevos servicios), así que hay que
-descargarlo periódicamente (1 vez/semana es razonable) y VERSIONARLO:
-guardamos cada descarga con su fecha y solo si el contenido ha cambiado.
+  En una frase: el valor de retraso lo da el feed; su delimitación al núcleo
+  Madrid y la definición de la población de trenes dependen del GTFS.
+
+El GTFS estático es EFÍMERO: RENFE publica solo la versión vigente (ventanas de
+~1 mes), así que hay que descargarlo periódicamente (1 vez/semana) y VERSIONARLO
+por contenido: guardamos cada descarga solo si su sha256 cambia respecto a la
+anterior. Para casar datos de RT antiguos hace falta la versión que regía ESA
+semana (histórico vía Transitland / Mobility Database), no la vigente hoy.
 
 Uso:
   python3 download_gtfs_static.py
-  python3 download_gtfs_static.py --data-dir /ruta/data
-
-Nota sobre la URL: el zip oficial está enlazado en el portal
-https://data.renfe.com (dataset de horarios GTFS de Cercanías).
-Si la URL de abajo dejara de funcionar, entrad al portal, localizad el
-dataset GTFS de Cercanías y actualizad GTFS_STATIC_URL.
+  python3 download_gtfs_static.py --data-dir /home/tfm/data-renfe
 """
-
 import argparse
 import hashlib
 import sys
@@ -30,11 +37,17 @@ from pathlib import Path
 
 import requests
 
-# URL histórica del GTFS de Cercanías (Fomento/MITMA). Verificad en
-# data.renfe.com que sigue siendo la vigente la primera vez que lo ejecutéis.
-GTFS_STATIC_URL = "https://data.renfe.com/dataset/77525d66-f095-46d0-80c0-37f735d4342f/resource/6f1523c6-a9e3-48e3-9ace-bb107a762be6/download/fomento_transit.zip"
+# URL vigente del GTFS de Cercanías (descarga directa desde RENFE, CC BY 4.0).
+# Corregida 08/2026: la antigua de data.renfe.com quedó obsoleta (cambio de
+# producer URL avisado por Mobility Database). Si dejara de funcionar, consultar
+# el feed `f-cercanias~renfe` en Transitland / Mobility Database.
+GTFS_STATIC_URL = "https://ssl.renfe.com/ftransit/Fichero_CER_FOMENTO/fomento_transit.zip"
 
-USER_AGENT = "TFM-UCM-CercaniasDelays/1.0 (proyecto academico; contacto: PON_AQUI_TU_EMAIL)"
+# Contacto público en el User-Agent (no exponer datos personales: usamos el repo).
+USER_AGENT = (
+    "TFM-UCM-CercaniasDelays/1.0 "
+    "(proyecto academico; github.com/I-Bovingdon/Renfe-delay-prediction-pipeline)"
+)
 
 
 def sha256(data: bytes) -> str:
@@ -55,7 +68,7 @@ def main():
     resp.raise_for_status()
     content = resp.content
 
-    # Validar que es un zip GTFS de verdad antes de guardarlo
+    # Validar que es un zip GTFS de verdad antes de guardarlo.
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     tmp = out_dir / f"_tmp_{stamp}.zip"
     tmp.write_bytes(content)
@@ -68,11 +81,11 @@ def main():
                 print(f"AVISO: el zip no contiene {missing}. ¿Es la URL correcta?")
     except zipfile.BadZipFile:
         tmp.unlink()
-        sys.exit("ERROR: lo descargado no es un zip válido. Revisa la URL en data.renfe.com")
+        sys.exit("ERROR: lo descargado no es un zip válido. Revisa GTFS_STATIC_URL.")
 
     digest = sha256(content)
 
-    # ¿Es idéntico al último guardado? Entonces no versionamos otra copia.
+    # Dedup por contenido: si es idéntico al último guardado, no versionamos otra copia.
     hash_file = out_dir / "last_hash.txt"
     if hash_file.exists() and hash_file.read_text().strip() == digest:
         tmp.unlink()
