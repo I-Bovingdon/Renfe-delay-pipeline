@@ -6,12 +6,14 @@ Reutiliza el filtro Madrid ESTRUCTURAL validado en el gate (03/08/2026):
   Madrid = route_id cuyo núcleo es 10 (dígitos antes de la 'T') -> sus trips
   -> sus stops (vía stop_times). Nada de bounding box geográfico.
 El puente RT <-> GTFS es el 'core' del trip_id: quitar el prefijo de publicación
-que RENFE incrusta distinto en RT y en estático (`^\\d+[A-Za-z]`).
+que RENFE incrusta distinto en RT y en estático (`^\d+[A-Za-z]`).
 
 Genera dos CSV para el equipo (a subir al Drive compartido):
-  - linea_por_core.csv    core -> route_id + nombre de línea (SOLO Madrid).
-      Resuelve la línea de cada trip_id del RT, que trae route_id null. Se valida
-      que dentro de Madrid cada core mapee a un único route_id.
+  - linea_por_core.csv    UNA fila por core -> línea (SOLO Madrid).
+      Resuelve la línea de cada trip_id del RT, que trae route_id null. RENFE define
+      varios route_id para la misma línea (variantes de terminal), así que un core
+      puede tocar >1 route_id pero SIEMPRE de la misma línea; se colapsa a una fila
+      por core para que el join del equipo no infle filas (fan-out).
   - estaciones_madrid.csv stop_id, nombre y lat/lon de las paradas del núcleo 10.
       Para filtrar Madrid por stop_id en trip_updates y en alerts, y para geo.
 
@@ -21,7 +23,7 @@ correcta del GTFS es responsabilidad de quien llama: para datos de junio/julio h
 falta el GTFS histórico de esa semana (ver P4), no el vigente.
 
 Uso (como tfm en el VPS):
-  python3 build_gtfs_reference.py \\
+  python3 build_gtfs_reference.py \
     --gtfs-zip /home/tfm/data-renfe/gtfs_static/gtfs_cercanias_20260805.zip
 Si se omite --gtfs-zip, coge el gtfs_cercanias_*.zip más reciente de
   <data-dir>/gtfs_static/. Salida por defecto en <data-dir>/gtfs_static/reference/.
@@ -53,7 +55,7 @@ def nucleo(route_id: str) -> str:
 
 
 def line_from_core(c: str) -> str:
-    """Línea (C1..C10) codificada al final del core. Solo cross-check con routes.txt."""
+    """Línea (C1..C10) codificada al final del core. Cross-check con routes.txt."""
     m = _LINE.search(c)
     return m.group(1) if m else "??"
 
@@ -110,32 +112,63 @@ def madrid_subset(gtfs_zip: str) -> dict:
 
 
 def build_linea_por_core(sub: dict) -> pd.DataFrame:
-    """core -> route_id + nombre de línea (solo Madrid). Valida unicidad core->route_id."""
+    """Una fila por core -> línea (solo Madrid).
+
+    RENFE define varios route_id para la misma línea (variantes de terminal/itinerario:
+    p.ej. C10 Villalba-Aeropuerto vs C10 El Escorial-Príncipe Pío). Por eso un core puede
+    tocar >1 route_id, pero SIEMPRE de la misma línea. Se colapsa a una fila por core para
+    que el join del equipo no infle filas (fan-out). El modelo necesita la LÍNEA; los
+    route_id que colisionan se listan en `route_ids` para trazabilidad.
+    """
     trips = sub["mad_trips"].copy()
     trips["core"] = trips["trip_id"].map(core)
 
-    routes = sub["routes"]
+    routes = sub["routes"].copy()
+    for col in ("route_short_name", "route_long_name"):
+        if col in routes.columns:
+            routes[col] = routes[col].str.strip()  # RENFE rellena los nombres con espacios
     name_cols = [c for c in ("route_short_name", "route_long_name") if c in routes.columns]
-    ref = (
+
+    pairs = (
         trips[["core", "route_id"]]
         .merge(routes[["route_id"] + name_cols], on="route_id", how="left")
         .drop_duplicates()
     )
+    has_short = "route_short_name" in pairs.columns
 
-    # Dentro de Madrid, cada core debería mapear a un único route_id.
-    multi = ref.groupby("core")["route_id"].nunique()
-    multi = multi[multi > 1]
-    if len(multi):
-        print(
-            f"AVISO: {len(multi)} cores con >1 route_id dentro de Madrid (esperado 0). "
-            f"Ejemplos: {list(multi.index[:5])}",
-            file=sys.stderr,
-        )
-    else:
-        print("OK: cada core -> un único route_id dentro de Madrid.")
+    # Chequeo que de verdad importa: ¿cada core -> una sola LÍNEA?
+    if has_short:
+        lines_per_core = pairs.groupby("core")["route_short_name"].nunique()
+        collision = lines_per_core[lines_per_core > 1]
+        if len(collision):
+            print(
+                f"AVISO GRAVE: {len(collision)} cores con >1 LÍNEA en Madrid "
+                f"(colisión real del puente RT<->GTFS): {list(collision.index[:5])}",
+                file=sys.stderr,
+            )
+        else:
+            print("OK: cada core -> una única línea dentro de Madrid.")
+
+    # Colapsar a una fila por core.
+    grp = pairs.groupby("core")
+    data = {
+        "n_route_ids": grp["route_id"].nunique(),
+        "route_ids": grp["route_id"].agg(lambda s: "|".join(sorted(set(s)))),
+    }
+    if has_short:
+        data["linea"] = grp["route_short_name"].agg(lambda s: sorted(set(s))[0])
+    ref = pd.DataFrame(data).reset_index()
 
     ref["line_from_core"] = ref["core"].map(line_from_core)
-    return ref.sort_values(["route_id", "core"]).reset_index(drop=True)
+    if has_short:
+        mismatch = (ref["linea"].str.upper() != ref["line_from_core"].str.upper()).sum()
+        if mismatch:
+            print(f"Nota: {mismatch} cores donde routes.txt y el sufijo del core discrepan.")
+        ref = ref[["core", "linea", "line_from_core", "n_route_ids", "route_ids"]]
+        ref = ref.sort_values(["linea", "core"])
+    else:
+        ref = ref.sort_values("core")
+    return ref.reset_index(drop=True)
 
 
 def build_estaciones_madrid(sub: dict) -> pd.DataFrame:
@@ -143,6 +176,8 @@ def build_estaciones_madrid(sub: dict) -> pd.DataFrame:
     stops = sub["stops"]
     keep = [c for c in ("stop_id", "stop_name", "stop_lat", "stop_lon") if c in stops.columns]
     est = stops.loc[stops["stop_id"].isin(sub["mad_stop_ids"]), keep].copy()
+    if "stop_name" in est.columns:
+        est["stop_name"] = est["stop_name"].str.strip()
     return est.sort_values("stop_id").reset_index(drop=True)
 
 
@@ -179,7 +214,7 @@ def main():
     p2 = out_dir / "estaciones_madrid.csv"
     linea.to_csv(p1, index=False)
     est.to_csv(p2, index=False)
-    print(f"Escrito: {p1}  ({len(linea)} filas)")
+    print(f"Escrito: {p1}  ({len(linea)} filas, 1 por core)")
     print(f"Escrito: {p2}  ({len(est)} filas)")
 
 
