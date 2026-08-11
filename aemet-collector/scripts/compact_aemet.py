@@ -123,10 +123,19 @@ def main():
     else:
         df = compact_climatologia(data_dir, args.date)
         feed = "climatologia_diaria"
-
     if df.empty:
         print(f"{feed}: no hay datos que compactar.")
         return
+    # Deduplicar: el raw es inmutable y puede solapar (p.ej. rebajados de backfill
+    # con distinto troceo de ventanas), pero el processed debe ser canónico.
+    # La clave depende del tipo: clima = 1 fila/estación-día; observación = 1 fila/estación-hora.
+    clave = ["estacion_id", "fecha"] if args.tipo == "climatologia" else ["estacion_id", "fecha_hora"]
+    clave = [c for c in clave if c in df.columns]
+    if clave:
+        antes = len(df)
+        df = df.drop_duplicates(subset=clave, keep="last").reset_index(drop=True)
+        if antes != len(df):
+            print(f"{feed}: deduplicado {antes - len(df):,} filas por {clave}.")
 
     out_dir = data_dir / "processed" / feed
     out_dir.mkdir(parents=True, exist_ok=True)
