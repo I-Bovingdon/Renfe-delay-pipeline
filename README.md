@@ -1,217 +1,203 @@
-# TFM Cercanías — Pipeline de captura y compactación de datos en tiempo real (RENFE)
+# Cercanías Madrid · Pipeline de captura de datos
 
-Pipeline de ingesta multifuente 24/7 para el TFM **"Predicción de retrasos en Cercanías de Madrid"** (Máster en Data Science, Big Data & Business Analytics — UCM). Construye desde cero el histórico de retrasos necesario para el modelado, capturando los feeds GTFS-Realtime de RENFE y datos meteorológicos de AEMET.
+**Aplicación que usa estos datos:** [cercanias-madrid.es](https://cercanias-madrid.es) ·
+[repositorio de la aplicación](https://github.com/I-Bovingdon/renfe-delay-app)
 
----
+Trabajo Fin de Máster del Máster en Data Science, Big Data & Business Analytics (UCM, 2026).
+Este repositorio contiene la ingesta 24/7 que construye desde cero el histórico de retrasos
+de Cercanías de Madrid, que Renfe no publica, y los datos meteorológicos que lo acompañan.
 
-## El problema de fondo: no existe histórico público de retrasos
-
-RENFE no archiva ni publica histórico de retrasos de Cercanías. El estado del servicio se expone únicamente mediante tres feeds **GTFS-Realtime efímeros** que se refrescan cada ~20-30 segundos y se sobreescriben sin guardar nada:
-
-| Feed | Contenido | Rol en el proyecto |
-|---|---|---|
-| `trip_updates` | Retraso por tren y próxima parada | **Variable objetivo** |
-| `vehicle_positions` | Posición GPS, estado del tren | Features de estado de red |
-| `alerts` | Incidencias en texto libre | Entrada del componente NLP |
-
-**Consecuencia directa:** cada día sin captura activa es información de entrenamiento perdida de forma irrecuperable. No hay forma de recuperar retroactivamente lo que no se capturó. Esto convierte la infraestructura de ingesta — y no el modelado — en la prioridad absoluta de la primera fase del proyecto.
+> **In English.** A 24/7 ingestion pipeline on a 5 € VPS that captures Renfe's
+> GTFS-Realtime feeds every 60 seconds and AEMET weather every hour, stores the raw
+> JSON immutably, compacts it nightly to Parquet and backs it up to Google Drive.
+> Running since 13 June 2026, it is the only source of training data for the delay
+> model served by
+> [renfe-delay-app](https://github.com/I-Bovingdon/renfe-delay-app).
 
 ---
 
-## Decisiones de diseño y por qué se tomaron
+## El problema de partida
 
-### 1. VPS 24/7 en lugar de Databricks o servicios cloud gestionados
+**Renfe no archiva ni publica histórico de retrasos de Cercanías.** Solo expone tres feeds
+GTFS-Realtime que se sobrescriben cada 20 a 30 segundos. Lo que no se captura en el momento
+se pierde para siempre, así que la ingesta fue la primera pieza del proyecto y la de mayor
+prioridad.
 
-El colector pasa el 99% del tiempo esperando la respuesta del feed (I/O puro). Databricks y similares cobran por tiempo de cluster activo, lo que haría el coste completamente desproporcionado para una tarea que consume menos de 1 CPU y apenas memoria.
+## Qué captura
 
-**Decisión:** VPS Hetzner CX23 (2 vCPU / 4GB RAM / 40GB SSD, ~4,83 €/mes), pagado con PayPal. Se evaluaron Google Cloud (e2-micro free tier) y Oracle Cloud (free tier ARM), ambos descartados por requerir tarjeta de crédito y por fricciones en el alta (Oracle bloqueó el registro por antifraude). Hetzner no exige tarjeta y no tiene fricciones.
+| Fuente | Frecuencia | Contenido | Uso |
+|---|---|---|---|
+| `trip_updates` (Renfe) | 60 s | Retraso por tren en su próxima parada | Variable objetivo |
+| `vehicle_positions` (Renfe) | 60 s | Posición y estado de cada tren | Estado de la red y mapa |
+| `alerts` (Renfe) | 60 s | Incidencias en texto libre | Variables de incidencias y pantalla de alertas |
+| AEMET OpenData | 1 h | Observación horaria de 15 estaciones del corredor | Variables meteorológicas |
+| GTFS estático (Renfe) | Diaria | Horario teórico, líneas y paradas | Línea de cada tren, filtro de Madrid, catálogo de la app |
 
-Databricks sí tendrá sentido en la fase de modelado, donde el cómputo distribuido justifica el coste. No aquí.
+Además se descargó la climatología diaria de AEMET de 2020 a 2025.
 
-### 2. Frecuencia de captura: 60 segundos
-
-El feed GTFS-RT de RENFE **no publica la serie temporal del retraso de un tren**: solo da el estado de la próxima parada en el momento de la consulta. Esto significa que la evolución del retraso minuto a minuto no existe en el feed — hay que reconstruirla captura a captura.
-
-**Decisión:** 60 segundos, validado empíricamente con el notebook de exploración. Con menos frecuencia se pierde resolución en la reconstrucción de la serie. Con más frecuencia el volumen crece sin aportar información nueva (el feed tarda ~20-30s en refrescarse).
-
-### 3. Arquitectura por capas: raw inmutable → processed → backup
-
-Escribir directamente en un formato de análisis (p.ej. Parquet) durante la captura introduce riesgo: un fallo a mitad del proceso puede corromper el archivo del día. Además, los requisitos de consulta para el EDA son distintos de los requisitos de la ingesta en tiempo real.
-
-**Decisión:** separación en dos capas con responsabilidades distintas:
-- **Raw:** JSON crudo comprimido, inmutable, deduplicado por timestamp de cabecera GTFS-RT. Nunca se toca tras escribirse.
-- **Processed:** Parquet diario generado por un proceso de compactación nocturna independiente. El análisis y el modelado operan siempre sobre esta capa.
-
-Este patrón es el estándar en arquitecturas lakehouse (medallion architecture) y minimiza el riesgo de pérdida de datos ante fallos del proceso de análisis.
-
-### 4. Resiliencia con systemd
-
-Un colector que se cae silenciosamente es equivalente a no tener colector: los datos se pierden sin que nadie lo note.
-
-**Decisión:** servicios systemd con `Restart=always` y `RestartSec=10`. Verificado empíricamente con un reboot de control: ambos colectores volvieron a `active (running)` sin intervención manual. Logs rotativos para diagnóstico. Escritura atómica en la capa raw para evitar archivos parciales.
-
-### 5. Fuente meteorológica: AEMET, descarte de Twitter/X
-
-Se evaluaron varias fuentes exógenas:
-- **Twitter/X:** descartado. La API tiene coste (0,005 $/lectura) y el contenido es redundante con el feed oficial de `alerts`, que ya incluye incidencias en texto libre. Se documenta el descarte en la memoria del TFM.
-- **AEMET API abierta:** elegida. Gratuita, fiable, con cobertura histórica desde 2020 y resolución horaria. Se seleccionaron 15 estaciones del corredor de Cercanías validadas contra el inventario real.
-
-**Sesgo conocido:** el histórico propio de retrasos cubre desde junio (verano, sin lluvia). El cruce clima-retraso en invierno solo será posible si se consigue histórico de terceros con licencia (p.ej. retrasosrenfe.com — pendiente verificar términos).
-
-### 6. La línea de Cercanías no está en el feed
-
-`route_id` es null en el 100% de los registros de `trip_updates` y `vehicle_positions`. La línea (C-1, C-3, C-4...) hay que obtenerla cruzando `trip_id` con `trips.txt` del GTFS estático, o mediante regex sobre el sufijo del propio `trip_id` (p.ej. `...C3` → línea C-3). El sufijo es rápido pero ambiguo: C-1 existe en Madrid, Valencia, Sevilla y Cádiz — necesita línea + núcleo para ser inequívoco.
+**Volumen a 15/09/2026:** 94 días compactados (del 13/06 al 14/09), con 3,1 GB en bruto
+comprimido y 468 MB en Parquet de Renfe, y 1,2 GB de AEMET con el histórico incluido.
+El disco del servidor está al 46 % de 38 GB.
 
 ---
 
 ## Arquitectura
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  FUENTES                                                         │
-│  RENFE GTFS-RT (trip_updates · vehicle_positions · alerts)       │
-│  AEMET (observación horaria en vivo · climatología histórica)    │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │  captura cada 60s (RENFE) / 60min (AEMET)
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  CAPA RAW  (inmutable)                                           │
-│  data-renfe/raw/<feed>/<fecha>/*.json.gz                         │
-│  data-aemet/raw/<feed>/*.json.gz                                 │
-│  JSON crudo comprimido, dedup por timestamp de cabecera GTFS-RT  │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │  compactación diaria (cron 03:30-03:35)
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  CAPA PROCESSED  (capa de trabajo)                               │
-│  data-renfe/processed/<feed>/<feed>_<fecha>.parquet              │
-│  data-aemet/processed/observacion_horaria/<fecha>.parquet        │
-│  Tabular plano, listo para pandas / EDA / modelado               │
-└───────────────────────────┬──────────────────────────────────────┘
-                            │  backup diario (cron 04:00, root)
-                            ▼
-┌──────────────────────────────────────────────────────────────────┐
-│  BACKUP — Google Drive (rclone), carpeta TFM-backup-datos/       │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Fuentes
+        R[Renfe GTFS-RT<br/>cada 60 s]
+        A[AEMET<br/>cada hora]
+        G[GTFS estático<br/>diario]
+    end
+    subgraph VPS["VPS Hetzner · 2 vCPU · 4 GB"]
+        C[Colectores 24/7<br/>systemd] --> RAW[(raw/<br/>JSON comprimido<br/>inmutable)]
+        RAW --> K[Compactación<br/>03:30 y 03:35] --> P[(processed/<br/>Parquet diario)]
+        G --> GS[(gtfs_static/)]
+    end
+    R --> C
+    A --> C
+    RAW --> B[(Google Drive<br/>rclone copy 04:00)]
+    P --> B
+    P --> M[Tabla de modelado]
+    GS --> M
+    M --> APP[renfe-delay-app]
+    RAW -. estado en vivo .-> APP
 ```
 
-**Principio rector:** "cada tarea con su herramienta". Captura ligera 24/7 en VPS; cómputo pesado de modelado reservado para Databricks/notebooks — no para la ingesta.
+### Cadena nocturna
 
----
+Hora del servidor (UTC). El orden importa: cada tarea usa lo que deja la anterior.
 
-## Infraestructura
-
-- **Servidor:** VPS Hetzner CX23 (2 vCPU / 4GB RAM / 40GB SSD, Ubuntu 24.04), ~4,83 €/mes. Elegido por aceptar PayPal sin tarjeta de crédito.
-- **Usuarios:** colectores y crons de compactación corren como `tfm`; backup a Drive en el crontab de `root`.
-- **Backup:** `rclone` hacia Google Drive (`gdrive:TFM-backup-datos/`), copia diaria de `raw` (y `processed` cuando se incorpore al script).
-- **Resiliencia:** servicios systemd con reinicio automático, verificados tras reboot de control.
-
----
-
-## Estructura del repositorio
-
-```
-tfm-cercanias-colectores/
-│
-├── renfe-collector/
-│   ├── scripts/
-│   │   ├── collector.py              # Captura 24/7 de los 3 feeds GTFS-RT (systemd)
-│   │   ├── compact_day.py            # Compactación diaria raw -> processed (Parquet)
-│   │   ├── download_gtfs_static.py   # Descarga GTFS estático (trips.txt, stops.txt)
-│   │   └── inspect_day.py            # Inspección/diagnóstico de un día de capturas
-│   └── .venv/                        # Entorno Python (pandas, pyarrow)
-│
-├── aemet-collector/
-│   ├── scripts/
-│   │   ├── collector_live.py         # Captura horaria en vivo (systemd)
-│   │   ├── backfill_historico.py     # Descarga climatología histórica (2020-2025)
-│   │   ├── compact_aemet.py          # Compactación raw -> processed (Parquet)
-│   │   ├── aemet_common.py           # Utilidades compartidas (API de dos saltos, parsing)
-│   │   └── estaciones_madrid.py      # Listado de estaciones del corredor Cercanías
-│   └── .env                          # API key AEMET (NO en git, en .gitignore)
-│
-├── explora.ipynb                     # Notebook de exploración/auditoría inicial
-└── .gitignore
-```
-
-> En el servidor, los datos viven fuera del repo: `/home/tfm/data-renfe/` y `/home/tfm/data-aemet/` (carpetas `raw/` y `processed/`).
-
----
-
-## Servicios y crons desplegados
-
-### systemd (captura 24/7)
-
-| Servicio | Comando | Estado |
+| Hora | Tarea | Usuario |
 |---|---|---|
-| `renfe-collector.service` | `collector.py --data-dir /home/tfm/data-renfe --interval 60` | `enabled` + `active` |
-| `aemet-collector.service` | `collector_live.py --loop --interval 3600 --data-dir /home/tfm/data-aemet` | `enabled` + `active` |
-
-Ambos verificados tras reboot de control. Para actualizar: `git pull` + `systemctl restart <servicio>`.
-
-### Cron de compactación (usuario `tfm`)
-
-```cron
-30 3 * * * .../renfe-collector/.venv/bin/python .../renfe-collector/scripts/compact_day.py --data-dir /home/tfm/data-renfe >> /home/tfm/logs/compact_renfe.log 2>&1
-35 3 * * * .../renfe-collector/.venv/bin/python .../aemet-collector/scripts/compact_aemet.py --tipo observacion --date $(date -d yesterday +%Y-%m-%d) --data-dir /home/tfm/data-aemet >> /home/tfm/logs/compact_aemet.log 2>&1
-```
-
-Compacta siempre el **día anterior completo** (nunca el día en curso, que estaría incompleto). Un Parquet por día y por feed.
-
-### Cron de backup (usuario `root`)
-
-```cron
-0 4 * * * /home/tfm/backup-drive.sh
-```
-
-Se ejecuta después de la compactación (03:30-03:35), copiando `raw` a Google Drive.
+| 03:30 | Compactación de Renfe del día anterior (`compact_day.py`) | tfm |
+| 03:35 | Compactación de AEMET del día anterior (`compact_aemet.py`) | tfm |
+| 03:45 | Descarga del GTFS estático (`download_gtfs_static.py`) | tfm |
+| 03:55 | Regeneración del catálogo de la aplicación (en [renfe-delay-app](https://github.com/I-Bovingdon/renfe-delay-app)) | tfm |
+| 04:00 | Copia de `data-renfe` y `data-aemet` a Google Drive | root |
 
 ---
 
-## Hallazgos de la auditoría inicial (datos reales, 13-14/06/2026)
+## Decisiones de diseño
 
-Validados con ~469 snapshots RENFE y ~1.100 observaciones AEMET del primer día completo.
+- **Un VPS de unos 5 € al mes y no Databricks ni un servicio gestionado.** El colector pasa
+  casi todo el tiempo esperando la respuesta del feed y consume menos de una CPU; pagar un
+  clúster por esperar no tiene sentido. Se eligió Hetzner porque Oracle Cloud y Google
+  Cloud exigían tarjeta de crédito, y se descartó GitHub Actions con cron porque su
+  planificación no está garantizada.
+- **Captura cada 60 segundos.** El feed solo da el estado de la próxima parada, así que la
+  evolución del retraso se reconstruye captura a captura. Con menos frecuencia se pierde
+  resolución; con más, crece el volumen sin información nueva.
+- **Capas separadas: bruto inmutable, Parquet y copia.** El JSON se guarda tal cual llega,
+  deduplicado por la marca de tiempo del feed y con escritura atómica. Un error de
+  transformación se corrige reprocesando; un dato no capturado no se recupera.
+- **systemd con reinicio automático.** Un colector que se cae en silencio equivale a no
+  tenerlo. Verificado con un reinicio de control del servidor.
+- **`rclone copy` y no `sync`.** La copia solo añade: un borrado en el servidor nunca se
+  propaga a Drive.
+- **AEMET sí, Twitter/X no.** La API de X cuesta dinero por lectura y su contenido repite
+  el feed oficial de incidencias.
+- **La clave de AEMET nunca entra en Git.** Vive en el `.env` del servidor;
+  el repositorio solo incluye `.env.example`.
 
-### Lo que el feed sí publica
+---
 
-- **Variable objetivo rica:** `arrival_delay_s` — mediana 0s, p90 ~6 min, p99 ~28 min, máximo observado ~54 min. ~33% de observaciones ≥5 min, ~10% ≥15 min.
-- **Cobertura nacional:** el feed incluye Madrid, Barcelona, Valencia, Sevilla y otros núcleos (~121 trenes activos en hora punta de viernes). Pendiente confirmar si publica todos los trenes o solo los que presentan desviación — afecta a la definición del target.
-- **AEMET sólida:** temperatura y precipitación con 0% de nulos. Viento ~16% nulos. Presión ~48% nulos — candidata a descarte.
+## Estructura
 
-### Lo que el feed NO publica (y cómo se compensa)
+```
+renfe-collector/
+  scripts/collector.py              Captura 24/7 de los tres feeds (systemd)
+  scripts/compact_day.py            Compactación diaria a Parquet
+  scripts/download_gtfs_static.py   Descarga diaria del GTFS estático
+  scripts/build_gtfs_reference.py   Tablas de referencia de Madrid: línea por tren y estaciones
+  scripts/inspect_day.py            Diagnóstico de un día de capturas
+  deploy/renfe-collector.service    Servicio systemd, con las rutas del servidor
+  explora.ipynb                     Cuaderno de la auditoría inicial de los feeds
+aemet-collector/
+  scripts/collector_live.py         Observación horaria en vivo (systemd)
+  scripts/backfill_historico.py     Climatología histórica 2020 a 2025
+  scripts/compact_aemet.py          Compactación a Parquet con deduplicación
+  scripts/aemet_common.py           Cliente de la API de AEMET
+  scripts/estaciones_madrid.py      Estaciones del corredor de Cercanías
+  deploy/aemet-collector.service    Servicio systemd, con las rutas del servidor
+  .env.example                      Plantilla de la clave (la real nunca se versiona)
+docs/
+  Estructura_Datos_TFM_Cercanias.pdf  Esquema de los datos capturados
+```
 
-| Campo ausente | Impacto | Solución adoptada |
+En el servidor, el repositorio está en `/home/tfm/tfm-cercanias-colectores` y los datos
+viven fuera de él, en `/home/tfm/data-renfe` y `/home/tfm/data-aemet`, con carpetas `raw/`
+y `processed/`. Cada colector tiene su propio README con la instalación paso a paso.
+
+## Despliegue y actualización
+
+```bash
+# En el servidor, como usuario tfm
+git -C /home/tfm/tfm-cercanias-colectores pull --ff-only
+sudo systemctl restart renfe-collector aemet-collector   # solo si cambian los colectores
+```
+
+Los crons de compactación usan el entorno virtual de `renfe-collector/.venv` (pandas y
+pyarrow); los colectores, el Python del sistema.
+
+---
+
+## Lo que el feed no publica, y cómo se resolvió
+
+Auditoría inicial sobre datos reales del 13 y 14 de junio, ampliada después.
+
+| Campo ausente | Consecuencia | Solución |
 |---|---|---|
-| `route_id` (100% null) | No se sabe la línea directamente | Cruce `trip_id` ↔ `trips.txt` del GTFS estático; regex sobre sufijo del `trip_id` como Plan B |
-| Serie temporal del retraso | El feed da solo la próxima parada, no toda la trayectoria | Se reconstruye capturando cada 60s y cruzando snapshots consecutivos por `trip_id` |
-| `bearing` / `speed` (100% null) | No hay velocidad instantánea del tren | No se usarán como features; la posición GPS sí está disponible |
-| `cause` / `effect` en alerts (100% null) | El tipo de incidencia no viene estructurado | NLP obligatorio sobre `description_text` para extraer tipo, líneas y estaciones afectadas |
-| `departure_delay_s` (~99% null) | Solo disponible el retraso de llegada | El target se define sobre `arrival_delay_s` |
+| `route_id` (nulo en el 100 %) | No se sabe la línea de cada tren | Cruce con el GTFS estático por el núcleo del `trip_id`, tras quitar el prefijo que Renfe publica distinto en tiempo real y en estático. Coincidencia del 99,9 % |
+| Serie temporal del retraso | Solo llega la próxima parada | Reconstrucción cruzando capturas consecutivas del mismo tren |
+| `bearing` y `speed` (nulos) | No hay rumbo ni velocidad | El rumbo del mapa se deriva del tramo de vía entre estaciones |
+| `cause` y `effect` en incidencias (nulos) | El tipo de incidencia no viene estructurado | Clasificación por expresiones regulares sobre el texto |
+| `departure_delay_s` (99 % nulo) | Solo hay retraso de llegada | El objetivo se define sobre `arrival_delay_s` |
 
-### Anomalías conocidas
+Otros hallazgos del primer día: el retraso tiene mediana 0 s, percentil 90 de unos 6 min y
+percentil 99 de unos 28 min. El feed es nacional (Madrid, Barcelona, Valencia, Sevilla…),
+así que el filtro de Madrid se hace por la estructura del `route_id` y no por coordenadas.
+El 13/06 apareció un 6,5 % de retrasos cercanos a ±24 h que no se repitió;
+`compact_day.py` avisa en el registro de cualquier retraso superior a 2 h.
 
-- **Glitch del 13/06:** 6,5% de registros con `arrival_delay_s` en torno a ±86.400s (~±24h). No reaparece en el 14/06. Posiblemente relacionado con `trip_schedule_relationship ≠ SCHEDULED`. `compact_day.py` registra aviso en log cuando `|delay| > 2h`. Filtro de consistencia temporal pendiente en la fase de limpieza.
-- **Retrasos negativos:** mínimo observado ~-2.580s (~43 min de adelanto). Pueden ser legítimos o artefactos del feed — pendiente de análisis.
+## Incidencias de operación
+
+- **Compactación de AEMET parada 27 días sin avisar.** El cron usaba la fecha del día en
+  curso y un `%` sin escapar. Corregido y rellenado al 100 %.
+- **Proceso eliminado por falta de memoria.** Resuelto con 2 GB de swap permanente y
+  límites de memoria en los servicios.
+- **Feeds vacíos en horario de servicio.** El colector avisa en el registro cuando un feed
+  llega sin contenido, para distinguir un fallo del emisor de uno propio.
 
 ---
 
-## Metodología de modelización prevista
+## Del dato al modelo
 
-- **Variable objetivo** (progresión): (a) clasificación por línea+franja, (b) regresión del retraso medio, (c) predicción de retraso tren+estación a 30-60 min.
-- **Métricas**: F1 / PR-AUC (no accuracy, por desbalanceo). Baseline = tasa histórica por línea-franja.
-- **Features**: calendario (hora punta, festivos), estado reciente de la red (propagación de retrasos), topológicas (paradas restantes, tramos compartidos), meteo (AEMET), incidencias (NLP sobre `description_text` de alerts).
-- **Modelos**: baseline lineal → Random Forest / gradient boosting (XGBoost/LightGBM/CatBoost) → series temporales → deep learning (LSTM/GRU/atención, GNN si el volumen lo justifica).
-- **NLP**: extracción de tipo/severidad/líneas afectadas desde `description_text`. Validación temporal sin fugas de datos.
-- **Productivización**: servicio línea+franja+condiciones → predicción, con MLflow para ciclo de vida del modelo.
+Los Parquet diarios y las tablas de referencia del GTFS alimentan la tabla de modelado, de
+11.431.362 filas y 28 variables, con la que se entrenó el modelo LightGBM en producción.
+El modelo, su validación y sus limitaciones están documentados en el
+[README de la aplicación](https://github.com/I-Bovingdon/renfe-delay-app#modelo).
 
----
+<!-- MODELADO: cuando se incorpore el código que construye la tabla (carpeta modelado/),
+     añadirla al bloque de Estructura y enlazarla aquí. -->
 
-## Pendiente (orden de prioridad)
+## Limitaciones
 
-1. ~~Compactación diaria a Parquet (`compact_day.py`, `compact_aemet.py`) + cron~~ ✅ hecho 14/06
-2. **Backfill histórico de AEMET** (`backfill_historico.py`) — climatología diaria 2020-2025
-3. **Verificar licencia de retrasosrenfe.com** — posible histórico de invierno de terceros
-4. **Integrar GTFS estático** — descargar y validar cruce `trip_id` ↔ `trips.txt`
-5. Incluir `processed` en el backup a Drive; decidir si migrar a carpeta compartida del grupo
+- **Histórico de verano.** La captura empieza en junio, así que el efecto de la lluvia está
+  poco representado. La climatología 2020 a 2025 no incluye retrasos.
+- **Un solo servidor.** No hay redundancia de captura: una caída del VPS es tiempo perdido.
+  La copia diaria protege lo capturado, no lo que se deja de capturar.
 
+## Equipo
 
+Ainhoa, Carlos, Jimena, Patricia, Rubén e Ismael.
+
+- **Infraestructura, pipeline de captura y este repositorio:** Ismael Bovingdon.
+
+Tutores: Carlos Ortega y Santiago Mota.
+
+## Licencia y fuentes
+
+Código bajo licencia MIT. Datos de Renfe (CC BY 4.0) y AEMET OpenData, sujetos a sus
+propias condiciones de uso.

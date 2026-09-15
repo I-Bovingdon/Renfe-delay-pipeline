@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# AJUSTAD usuario y rutas a vuestra maquina:
+# Rutas del despliegue real en el VPS (repo en /home/tfm/tfm-cercanias-colectores,
+# datos fuera del repo en /home/tfm/data-renfe). Instalado en /etc/systemd/system/.
 User=tfm
-WorkingDirectory=/home/tfm/renfe-collector
-ExecStart=/usr/bin/python3 /home/tfm/renfe-collector/scripts/collector.py --data-dir /home/tfm/renfe-collector/data --interval 60
+WorkingDirectory=/home/tfm/tfm-cercanias-colectores/renfe-collector
+ExecStart=/usr/bin/python3 /home/tfm/tfm-cercanias-colectores/renfe-collector/scripts/collector.py --data-dir /home/tfm/data-renfe --interval 60
 Restart=always
 RestartSec=15
 # Si la maquina anda justa de memoria, esto evita sustos:

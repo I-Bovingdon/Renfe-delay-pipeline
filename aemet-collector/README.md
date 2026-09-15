@@ -60,12 +60,17 @@ El backfill histórico **no** es un servicio: se lanza a mano una vez (o por
 tramos de años). Puede tardar, porque pausa 2 s entre peticiones para respetar
 los límites de AEMET y trocea el rango en ventanas de ~5 meses.
 
-### Cron sugerido
+### Cron
 
 ```cron
-# Compactar la observación del día, cada noche
-15 3 * * * cd /home/tfm/aemet-collector && /usr/bin/python3 scripts/compact_aemet.py --tipo observacion --date $(date -u +\%F) >> data/logs/compact.log 2>&1
+# Usuario tfm. Compacta el día ANTERIOR, después de la compactación de Renfe.
+35 3 * * * /home/tfm/tfm-cercanias-colectores/renfe-collector/.venv/bin/python /home/tfm/tfm-cercanias-colectores/aemet-collector/scripts/compact_aemet.py --tipo observacion --date $(date -u -d yesterday +\%F) --data-dir /home/tfm/data-aemet >> /home/tfm/logs/compact_aemet.log 2>&1
 ```
+
+Dos detalles que ya costaron un fallo silencioso de 27 días:
+
+- **`yesterday`, no la fecha de hoy.** A las 03:35 el día en curso apenas tiene datos.
+- **El `%` va escapado como `\%`.** En cron, un `%` sin escapar corta la línea.
 
 ## Caducidad de la API Key
 

@@ -5,11 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Rutas del despliegue real en el VPS (repo en /home/tfm/tfm-cercanias-colectores,
+# datos fuera del repo en /home/tfm/data-aemet). Instalado en /etc/systemd/system/.
 User=tfm
-WorkingDirectory=/home/tfm/aemet-collector
-# La clave se lee del fichero .env del WorkingDirectory (o de esta variable):
-# Environment=AEMET_API_KEY=...
-ExecStart=/usr/bin/python3 /home/tfm/aemet-collector/scripts/collector_live.py --loop --interval 3600 --data-dir /home/tfm/aemet-collector/data
+WorkingDirectory=/home/tfm/tfm-cercanias-colectores/aemet-collector
+# La clave se lee del fichero .env del WorkingDirectory, que nunca se versiona.
+# No la pongas en una línea Environment= de este fichero.
+ExecStart=/usr/bin/python3 /home/tfm/tfm-cercanias-colectores/aemet-collector/scripts/collector_live.py --loop --interval 3600 --data-dir /home/tfm/data-aemet
 Restart=always
 RestartSec=30
 MemoryMax=200M

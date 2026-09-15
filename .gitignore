@@ -1,9 +1,17 @@
-﻿.env
+# Credenciales: la clave de AEMET vive solo en el .env del servidor
+.env
 **/.env
+
+# Datos: viven en el servidor y en la copia de Drive, nunca en Git
 **/data/
+*.parquet
+*.zip
+
+# Python
 **/__pycache__/
 *.pyc
 .venv/
 **/.venv/
 
-*.zip
+# Documentos internos de gestión del proyecto (copias locales, no se publican)
+/0[0-9]_*.md

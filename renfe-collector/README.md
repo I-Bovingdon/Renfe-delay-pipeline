@@ -37,27 +37,15 @@ hace siempre contra `processed/`, nunca contra el crudo.
 
 ---
 
-## 1. Qué necesitáis (infraestructura)
+## 1. Infraestructura
 
-Una máquina Linux encendida 24/7 con Python 3.10+, ~1 GB de RAM y
-**40-60 GB de disco libres** (estimación holgada para ~12 semanas; ver §5).
-Opciones, por orden de recomendación:
+Desplegado en un VPS Hetzner CX23 (2 vCPU, 4 GB de RAM, 40 GB de disco, Ubuntu 24.04).
+Se descartaron Oracle Cloud y Google Cloud porque exigían tarjeta de crédito, y GitHub
+Actions con cron porque su planificación no está garantizada. El motivo completo está en
+el [README principal](../README.md).
 
-1. **VPS gratuito**: Oracle Cloud "Always Free" (ARM, 4 GB RAM, 200 GB disco)
-   o la e2-micro del free tier de Google Cloud. Ventaja: no depende de la
-   luz/wifi de nadie y todo el grupo puede entrar por SSH.
-2. **Raspberry Pi / PC viejo en casa de alguien del grupo**: perfecto si
-   tenéis uno. Riesgo: cortes de luz/red en vacaciones → mitigad con systemd
-   (`Restart=always`) y arranque automático tras corte.
-3. **VPS de pago barato** (Hetzner ~4 €/mes): si el grupo prefiere pagar poco
-   y dormir tranquilo, es la opción más simple.
-
-**Evitad** GitHub Actions con cron para esto: el scheduling no está
-garantizado y perderíais resolución y fiabilidad.
-
-> Consejo: sea cual sea la máquina, configurad un **rsync/backup diario** a
-> un Drive o a un segundo sitio. Estos datos no se pueden re-descargar:
-> perderlos = perder semanas de TFM.
+Estos datos no se pueden volver a descargar: la copia diaria a Google Drive es
+obligatoria, no opcional.
 
 ## 2. Instalación
 
@@ -96,41 +84,22 @@ tras un reinicio de la máquina.
 * * * * * cd /home/tfm/renfe-collector && /usr/bin/python3 scripts/collector.py --once >> data/logs/cron.log 2>&1
 ```
 
-## 4. Tareas programadas adicionales (cron)
+## 4. Tareas programadas (cron)
+
+La cadena nocturna real, con sus horas y su orden, está en el
+[README principal](../README.md#cadena-nocturna). Las dos tareas de este colector:
 
 ```cron
-# Compactación diaria raw -> Parquet (compacta AYER), 03:30 UTC
-30 3 * * * cd /home/tfm/renfe-collector && /usr/bin/python3 scripts/compact_day.py --data-dir data >> data/logs/compact.log 2>&1
-
-# Sincronización diaria a Google Drive (backup + acceso del grupo/tutores), 04:00
-# Requiere: instalar rclone (https://rclone.org/install/) y configurar el
-# remote con `rclone config` (tipo "drive", nombre "gdrive").
-0 4 * * * rclone sync /home/tfm/renfe-collector/data gdrive:TFM/renfe-data --transfers 4 >> /home/tfm/renfe-collector/data/logs/rclone.log 2>&1
-
-# GTFS estático (horarios teóricos): 1 vez/semana, lunes 05:00
-0 5 * * 1 cd /home/tfm/renfe-collector && /usr/bin/python3 scripts/download_gtfs_static.py >> data/logs/gtfs_static.log 2>&1
-
-# Chequeo diario de sanidad: si ayer no hubo capturas, lo veréis en este log
-30 7 * * * cd /home/tfm/renfe-collector && /usr/bin/python3 scripts/inspect_day.py --date $(date -u -d yesterday +\%Y-\%m-\%d) >> data/logs/daily_check.log 2>&1
+# Usuario tfm. Compacta el día ANTERIOR completo, nunca el día en curso.
+30 3 * * * /home/tfm/tfm-cercanias-colectores/renfe-collector/.venv/bin/python /home/tfm/tfm-cercanias-colectores/renfe-collector/scripts/compact_day.py --data-dir /home/tfm/data-renfe >> /home/tfm/logs/compact_renfe.log 2>&1
+# GTFS estático del día, antes de que la aplicación regenere su catálogo.
+45 3 * * * /usr/bin/python3 /home/tfm/tfm-cercanias-colectores/renfe-collector/scripts/download_gtfs_static.py --data-dir /home/tfm/data-renfe >> /home/tfm/logs/gtfs_download.log 2>&1
 ```
 
-**Orden importa**: compactar (03:30) antes de sincronizar (04:00), así el
-parquet del día anterior llega a Drive cada mañana.
-
-**Política con Google Drive**: el colector NUNCA escribe directamente en
-Drive (montajes inestables, rate limits de la API, riesgo de capturas
-perdidas). Escribe en disco local y rclone sincroniza después. Si la cuota
-de Drive es limitada (15 GB en cuentas gratuitas), sincronizad solo la capa
-de trabajo, que es ligera y es la que usaréis en los notebooks:
-
-```cron
-0 4 * * * rclone sync /home/tfm/renfe-collector/data/processed gdrive:TFM/renfe-data/processed >> /home/tfm/renfe-collector/data/logs/rclone.log 2>&1
-```
-
-y respaldad `raw/` a otro destino (disco externo, segundo VPS, bucket).
-
-**Rutina humana mínima**: una persona del grupo mira `daily_check.log` y
-`compact.log` cada mañana (2 minutos). Rotad por semanas.
+**Copia a Google Drive con `rclone copy`, nunca con `rclone sync`.** `sync` borra en el
+destino lo que no esté en el origen: un fallo o una limpieza en el servidor se
+propagaría a la copia de seguridad. `copy` solo añade. El colector nunca escribe
+directamente en Drive: escribe en disco local y la copia se hace después.
 
 ### Trabajar con los parquets (Colab / local)
 
