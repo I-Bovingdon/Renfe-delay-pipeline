@@ -30,7 +30,7 @@ prioridad.
 | `trip_updates` (Renfe) | 60 s | Retraso por tren en su próxima parada | Variable objetivo |
 | `vehicle_positions` (Renfe) | 60 s | Posición y estado de cada tren | Estado de la red y mapa |
 | `alerts` (Renfe) | 60 s | Incidencias en texto libre | Variables de incidencias y pantalla de alertas |
-| AEMET OpenData | 1 h | Observación horaria de 15 estaciones del corredor | Variables meteorológicas |
+| AEMET OpenData | 1 h | Observación horaria de las estaciones del corredor (15 seleccionadas; 12 con datos a 14/09) | Variables meteorológicas |
 | GTFS estático (Renfe) | Diaria | Horario teórico, líneas y paradas | Línea de cada tren, filtro de Madrid, catálogo de la app |
 
 Además se descargó la climatología diaria de AEMET de 2020 a 2025.
@@ -169,6 +169,9 @@ El 13/06 apareció un 6,5 % de retrasos cercanos a ±24 h que no se repitió;
   límites de memoria en los servicios.
 - **Feeds vacíos en horario de servicio.** El colector avisa en el registro cuando un feed
   llega sin contenido, para distinguir un fallo del emisor de uno propio.
+- **Tiempos de espera de Renfe el 1 y el 2 de septiembre.** Unos 700 avisos en dos días y
+  1.367 y 1.387 capturas frente a las 1.435 habituales: en torno a un 5 % y un 3 % menos.
+  El fallo fue de conexión con Renfe, no del servidor: el colector reintentó cada captura.
 
 ---
 
@@ -184,6 +187,12 @@ El modelo, su validación y sus limitaciones están documentados en el
 
 ## Limitaciones
 
+- **Cada Parquet diario de AEMET mezcla dos días.** La API devuelve las últimas 24 horas,
+  así que el fichero de un día incluye la tarde del anterior y le faltan las últimas horas
+  del propio día, que llegan en el fichero siguiente. La deduplicación es dentro de cada
+  fichero: al unir varios días hay que deduplicar por estación y hora.
+- **La copia a Drive recorre todo el árbol cada noche.** Tarda de 3 a 4 horas y ya ha
+  tocado el límite de peticiones de la API de Google, que rclone resolvió reintentando.
 - **Histórico de verano.** La captura empieza en junio, así que el efecto de la lluvia está
   poco representado. La climatología 2020 a 2025 no incluye retrasos.
 - **Un solo servidor.** No hay redundancia de captura: una caída del VPS es tiempo perdido.
