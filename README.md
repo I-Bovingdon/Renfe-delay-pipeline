@@ -158,20 +158,24 @@ Auditoría inicial sobre datos reales del 13 y 14 de junio, ampliada después.
 Otros hallazgos del primer día: el retraso tiene mediana 0 s, percentil 90 de unos 6 min y
 percentil 99 de unos 28 min. El feed es nacional (Madrid, Barcelona, Valencia, Sevilla…),
 así que el filtro de Madrid se hace por la estructura del `route_id` y no por coordenadas.
-El 13/06 apareció un 6,5 % de retrasos cercanos a ±24 h que no se repitió;
-`compact_day.py` avisa en el registro de cualquier retraso superior a 2 h.
+El 13/06 apareció un 6,5 % de retrasos cercanos a ±24 h. El artefacto reaparece de forma
+dispersa (0,3 % el 31/07 y 0,6 % el 01/08), y `compact_day.py` avisa en el registro de
+cualquier retraso superior a 2 h.
 
 ## Incidencias de operación
 
-- **Compactación de AEMET parada 27 días sin avisar.** El cron usaba la fecha del día en
-  curso y un `%` sin escapar. Corregido y rellenado al 100 %.
-- **Proceso eliminado por falta de memoria.** Resuelto con 2 GB de swap permanente y
-  límites de memoria en los servicios.
+- **Compactación de AEMET parada 27 días sin avisar.** El cron truncaba el comando en un
+  `%` sin escapar y fallaba antes de escribir su registro. Corregido y reprocesado al 100 %.
+- **Compactación de incidencias eliminada por falta de memoria** (días 17, 20, 21 y 22 de
+  agosto). Resuelto con 2 GB de swap permanente y reprocesado al 100 %.
 - **Feeds vacíos en horario de servicio.** El colector avisa en el registro cuando un feed
   llega sin contenido, para distinguir un fallo del emisor de uno propio.
 - **Tiempos de espera de Renfe el 1 y el 2 de septiembre.** Unos 700 avisos en dos días y
   1.367 y 1.387 capturas frente a las 1.435 habituales: en torno a un 5 % y un 3 % menos.
   El fallo fue de conexión con Renfe, no del servidor: el colector reintentó cada captura.
+- **Apagones del emisor el 12 y el 19 de julio.** Renfe respondió sin contenido; esos días
+  se excluyen del objetivo. El corte de red del proveedor del 27 de julio (31 minutos) se
+  excluye solo como ventana.
 
 ---
 
