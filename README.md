@@ -206,8 +206,6 @@ El modelo, su validación y sus limitaciones están documentados en el
 
 Ainhoa, Carlos, Jimena, Patricia, Rubén e Ismael.
 
-- **Infraestructura, pipeline de captura y este repositorio:** Ismael Bovingdon.
-
 Tutores: Carlos Ortega y Santiago Mota.
 
 ## Licencia y fuentes
